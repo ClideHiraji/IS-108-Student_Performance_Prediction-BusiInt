@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 from sklearn.compose import ColumnTransformer
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
+from sklearn.model_selection import cross_val_score
 from sklearn.model_selection import train_test_split
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.pipeline import Pipeline
@@ -83,14 +84,7 @@ def _make_knn_model(
 
 
 def _knn_feature_sets(columns: list[str]) -> list[tuple[str, list[str]]]:
-    available_cols = set(columns)
-    feature_sets = [("All features", columns)]
-
-    focused = [col for col in ["GPA", "StudyTimeWeekly", "Absences"] if col in available_cols]
-    if len(focused) == 3:
-        feature_sets.insert(0, ("GPA + study + absences", focused))
-
-    return feature_sets
+    return [("All features", columns)]
 
 
 def _train_knn(
@@ -154,13 +148,14 @@ def _train_knn(
 
     for k in k_list:
         curve_model = _make_knn_model(
-            best_info["feature_cols"],
-            k,
-            best_info["weights"],
+            best_info["feature_cols"], 
+            k, 
+            best_info["weights"], 
             best_info["metric"],
         )
+        cv_scores = cross_val_score(curve_model, X_tr, y_tr, cv=5, scoring="accuracy")
+        best_train_curve.append(float(cv_scores.mean()))                         
         curve_model.fit(X_tr, y_tr)
-        best_train_curve.append(accuracy_score(y_tr, curve_model.predict(X_tr)))
         best_test_curve.append(accuracy_score(y_te, curve_model.predict(X_te)))
 
     knn = _make_knn_model(
@@ -193,22 +188,39 @@ def _train_svm(
     c_value: float,
     log: Callable[[str], None],
 ) -> tuple[SVC, np.ndarray, dict[str, float], dict[str, list[float] | list[int]]]:
+    c_candidates = [0.1, 1.0, 10.0, 100.0]
+    svm_stratify = y_tr if bool((y_tr.value_counts() >= 2).all()) else None
+    X_svm_fit, X_svm_val, y_svm_fit, y_svm_val = train_test_split(
+        X_tr, y_tr, test_size=0.2, random_state=42, stratify=svm_stratify,
+    )
+    best_c = c_value
+    best_val_score = -1.0
+    log(f"SVM - tuning C in {c_candidates} with kernel={kernel} ...")
+    for c_candidate in c_candidates:
+        candidate = SVC(kernel=kernel, C=c_candidate, probability=False, random_state=42)
+        candidate.fit(X_svm_fit, y_svm_fit)
+        val_acc = accuracy_score(y_svm_val, candidate.predict(X_svm_val))
+        log(f"  C={c_candidate:<6}  validation={val_acc:.4f}")
+        if val_acc > best_val_score:
+            best_val_score = val_acc
+            best_c = c_candidate
+    log(f"SVM - best C={best_c} (validation={best_val_score:.4f})")
     n = len(X_tr)
     fracs = [0.2, 0.4, 0.6, 0.8, 1.0]
     sizes = [max(int(n * f), 10) for f in fracs]
     Xtr_a, ytr_a = X_tr.values, y_tr.values
     Xte_a, yte_a = X_te.values, y_te.values
 
-    log(f"SVM - learning curve  kernel={kernel}  C={c_value} ...")
+    log(f"SVM - learning curve  kernel={kernel}  C={best_c} ...")
     svm_tr, svm_te = [], []
     for size in sizes:
-        partial = SVC(kernel=kernel, C=c_value, probability=False, random_state=42)
+        partial = SVC(kernel=kernel, C=best_c, probability=False, random_state=42)
+        cv_tr = cross_val_score(partial, Xtr_a[:size], ytr_a[:size], cv=min(5, size), scoring="accuracy")
+        svm_tr.append(float(cv_tr.mean()))                                          # ← cross-val mean
         partial.fit(Xtr_a[:size], ytr_a[:size])
-        svm_tr.append(accuracy_score(ytr_a[:size], partial.predict(Xtr_a[:size])))
         svm_te.append(accuracy_score(yte_a, partial.predict(Xte_a)))
-        log(f"  n={size:4d}  train={svm_tr[-1]:.4f}  test={svm_te[-1]:.4f}")
 
-    svm = SVC(kernel=kernel, C=c_value, probability=True, random_state=42)
+    svm = SVC(kernel=kernel, C=best_c, probability=True, random_state=42)
     svm.fit(X_tr, y_tr)
     predictions = svm.predict(X_te)
     result = score_model(y_te, predictions)
@@ -237,12 +249,17 @@ def _train_ann(
     y_tr_idx = y_tr.map(class_to_index)
     log(f"ANN - epochs={epochs}  batch={batch_size} ...")
 
-    ann = build_ann(X_tr.shape[1], len(class_labels))
-    callbacks = [EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True)]
+    ann = build_ann(X_tr.shape[1], len(class_labels))                                      
+    callbacks = [EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True)] 
+
+    ann_stratify = y_tr_idx if bool((y_tr_idx.value_counts() >= 2).all()) else None
+    X_ann_fit, X_ann_val, y_ann_fit, y_ann_val = train_test_split(
+        X_tr, y_tr_idx, test_size=0.15, random_state=42, stratify=ann_stratify,
+    )
     history = ann.fit(
-        X_tr,
-        y_tr_idx,
-        validation_split=0.15,
+        X_ann_fit,
+        y_ann_fit,
+        validation_data=(X_ann_val, y_ann_val),
         epochs=epochs,
         batch_size=batch_size,
         callbacks=callbacks,
