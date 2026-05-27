@@ -188,7 +188,7 @@ def _train_svm(
     c_value: float,
     log: Callable[[str], None],
 ) -> tuple[SVC, np.ndarray, dict[str, float], dict[str, list[float] | list[int]]]:
-    c_candidates = [0.1, 1.0, 10.0, 100.0]
+    c_candidates = sorted(set([0.1, 1.0, 10.0, 100.0, c_value]))
     svm_stratify = y_tr if bool((y_tr.value_counts() >= 2).all()) else None
     X_svm_fit, X_svm_val, y_svm_fit, y_svm_val = train_test_split(
         X_tr, y_tr, test_size=0.2, random_state=42, stratify=svm_stratify,
